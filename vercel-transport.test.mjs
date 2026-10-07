@@ -34,7 +34,9 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(302, { location: '/ok' }).end();
     return;
   }
-  res.writeHead(req.url === '/missing' ? 404 : 200, { 'content-type': 'application/json' });
+  if (!res.headersSent) {
+    res.writeHead(req.url === '/missing' ? 404 : 200, { 'content-type': 'application/json' });
+  }
   res.end(JSON.stringify({ id: req.socket.testId, connection: req.headers.connection,
     method: req.method, body: Buffer.concat(chunks).toString(), custom: req.headers['x-test'] }));
 });
