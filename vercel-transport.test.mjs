@@ -10,9 +10,22 @@ const { Globals } = await import('./danmu_api/configs/globals.js');
 Globals.logLevel = 'error';
 
 let connectionId = 0;
+const sockets = new Set();
 const server = http.createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
+  if (req.url === '/rejected-stream') {
+    res.writeHead(403, { 'content-type': 'text/plain' });
+    const timer = setInterval(() => res.write('blocked '.repeat(10000)), 10);
+    res.on('close', () => clearInterval(timer));
+    return;
+  }
+  if (req.url === '/slow-body') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.flushHeaders();
+    await delay(250);
+    if (res.destroyed) return;
+  }
   if (req.url === '/slow') {
     await delay(250);
     if (res.destroyed) return;
@@ -25,7 +38,11 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ id: req.socket.testId, connection: req.headers.connection,
     method: req.method, body: Buffer.concat(chunks).toString(), custom: req.headers['x-test'] }));
 });
-server.on('connection', socket => { socket.testId = ++connectionId; });
+server.on('connection', socket => {
+  socket.testId = ++connectionId;
+  sockets.add(socket);
+  socket.on('close', () => sockets.delete(socket));
+});
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -57,6 +74,17 @@ try {
     assert.equal((await httpGet(base + '/redirect', { allow_redirects: false,
       validStatusCodes: [302] })).status, 302);
     assert.equal((await httpGet(base + '/missing', { validStatusCodes: [404] })).status, 404);
+  });
+  await test('rejected streaming response releases its socket', async () => {
+    await assert.rejects(httpGet(base + '/rejected-stream'), /HTTP error! status: 403/);
+    await delay(100);
+    assert.equal(sockets.size, 0);
+    assert.equal((await httpGet(base + '/ok')).status, 200);
+  });
+  await test('GET and POST timeout includes reading the response body', async () => {
+    await assert.rejects(httpGet(base + '/slow-body', { timeout: 30 }), { name: 'AbortError' });
+    await assert.rejects(httpPost(base + '/slow-body', '{}', { timeout: 30 }), { name: 'AbortError' });
+    assert.equal((await httpGet(base + '/ok')).status, 200);
   });
 } finally {
   server.closeAllConnections();

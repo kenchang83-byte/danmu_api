@@ -99,6 +99,17 @@ function shouldUseNodeFetch() {
   return USE_NODE_FETCH;
 }
 
+// Rejected responses must release their bodies instead of relying on GC.
+// Native fetch exposes a Web stream; node-fetch exposes a Node stream.
+async function discardResponse(response) {
+  try {
+    if (typeof response.body?.destroy === 'function') response.body.destroy();
+    else if (typeof response.body?.cancel === 'function') await response.body.cancel();
+  } catch {
+    // Preserve the original HTTP error if closing an already-aborted body fails.
+  }
+}
+
 export async function httpGet(url, options = {}) {
   // 单次搜索请求内 HTTP 响应复用: 若当前请求上下文已激活复用缓存且本 URL 已缓存, 直接返回克隆结果, 跳过重复网络请求
   const requestHttpCache = httpCacheContext.getStore();
@@ -170,10 +181,9 @@ export async function httpGet(url, options = {}) {
         });
       }
 
-      clearTimeout(timeoutId);
-
       // 非 2xx 且不在白名单内的状态码抛出异常
       if (!response.ok && !validStatusCodes.includes(response.status)) {
+        await discardResponse(response);
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
@@ -326,6 +336,7 @@ export async function httpGet(url, options = {}) {
       }
     } finally {
       // 请求生命周期结束，释放监听器内存引用
+      clearTimeout(timeoutId);
       cleanupSignal();
     }
   }
@@ -393,8 +404,6 @@ export async function httpPost(url, body, options = {}) {
         response = await fetch(url, fetchOptions);
       }
 
-      clearTimeout(timeoutId);
-
       const data = await response.text();
 
       if (!response.ok && !validStatusCodes.includes(response.status)) {
@@ -458,6 +467,7 @@ export async function httpPost(url, body, options = {}) {
       }
     } finally {
       // 请求生命周期结束，释放监听器内存引用
+      clearTimeout(timeoutId);
       cleanupSignal();
     }
   }
@@ -795,6 +805,7 @@ export async function httpGetWithStreamCheck(url, options = {}, checkCallback) {
     }
 
     if (!response.ok) {
+      await discardResponse(response);
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
