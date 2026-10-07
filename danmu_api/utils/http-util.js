@@ -67,9 +67,14 @@ const IS_NODE_RUNTIME = globalThis.__FORWARD_WIDGET__ !== true
   && typeof process !== 'undefined'
   && Boolean(process.versions?.node);
 
+// Vercel may suspend and resume warm functions. Do not carry outbound sockets
+// across that boundary or use its instrumented global fetch for source requests.
+const IS_VERCEL_RUNTIME = IS_NODE_RUNTIME && process.env.VERCEL === '1';
+
 // 旧版 Node（<20.19.0，自带 undici 解析响应头时丢弃 Set-Cookie）与 iOS 巨魔（无 WebAssembly、无原生 fetch）改用 node-fetch v3（其 Headers 正常暴露 Set-Cookie）；降级边界与 esm-shim 的 20.19.0 一致，Node >= 20.19.0 仍用原生 fetch。判定仅依赖静态环境、进程内恒定，故模块加载时算一次并缓存。
 function detectNodeFetchDowngrade() {
   if (!IS_NODE_RUNTIME) return typeof WebAssembly === 'undefined';
+  if (IS_VERCEL_RUNTIME) return true;
   const [major, minor] = process.versions.node.split('.').map(Number);
   return major < 20 || (major === 20 && minor < 19);
 }
@@ -77,12 +82,14 @@ function detectNodeFetchDowngrade() {
 const USE_NODE_FETCH = detectNodeFetchDowngrade();
 if (USE_NODE_FETCH) {
   // 模块载入时 logLevel 尚未初始化，用 console.log 保证启动提示必现
-  console.log("[system] [http] 检测到旧版Node/iOS环境，已全局切换至 node-fetch v3 作为请求实现");
+  console.log(IS_VERCEL_RUNTIME
+    ? "[system] [http] Vercel uses node-fetch with outbound connection reuse disabled"
+    : "[system] [http] 检测到旧版Node/iOS环境，已全局切换至 node-fetch v3 作为请求实现");
 }
 
 // 降级分支共享 keep-alive Agent，复用 TCP/TLS 连接以与原生 undici 连接池达到实际等价（消除重复握手开销）；按协议区分 https/http
-const nodeFetchHttpsAgent = USE_NODE_FETCH && IS_NODE_RUNTIME ? new https.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: 256 }) : null;
-const nodeFetchHttpAgent = USE_NODE_FETCH && IS_NODE_RUNTIME ? new http.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: 256 }) : null;
+const nodeFetchHttpsAgent = USE_NODE_FETCH && IS_NODE_RUNTIME ? new https.Agent({ keepAlive: !IS_VERCEL_RUNTIME, keepAliveMsecs: 1000, maxSockets: 256 }) : null;
+const nodeFetchHttpAgent = USE_NODE_FETCH && IS_NODE_RUNTIME ? new http.Agent({ keepAlive: !IS_VERCEL_RUNTIME, keepAliveMsecs: 1000, maxSockets: 256 }) : null;
 function nodeFetchAgent(parsedUrl) {
   const protocol = parsedUrl instanceof URL ? parsedUrl.protocol : new URL(parsedUrl).protocol;
   return protocol === 'https:' ? nodeFetchHttpsAgent : nodeFetchHttpAgent;
